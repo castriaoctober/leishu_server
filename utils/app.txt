@@ -1,0 +1,1118 @@
+import pymysql
+from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
+import json
+from flask import Flask, request, jsonify, render_template
+import re
+from datetime import datetime
+import warnings
+from elasticsearch import ElasticsearchWarning
+import logging
+from flask_cors import CORS
+
+# 配置日志
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 忽略Elasticsearch安全警告
+warnings.filterwarnings("ignore", category=ElasticsearchWarning)
+
+app = Flask(__name__)
+CORS(app) 
+
+# 数据库连接配置
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': '191214biovsc',
+    'db': 'experiment',
+    'charset': 'utf8mb4'
+}
+
+# Elasticsearch连接配置
+ES_CONFIG = {
+    'hosts': ['http://localhost:9200']
+}
+
+# 初始化Elasticsearch客户端
+es = Elasticsearch(**ES_CONFIG)
+
+# 索引名称
+INDEX_NAME = 'leishu_index'
+
+
+def connect_db():
+    """连接MySQL数据库"""
+    try:
+        return pymysql.connect(**DB_CONFIG)
+    except Exception as e:
+        logger.error(f"数据库连接失败: {e}")
+        raise
+
+
+def create_es_index():
+    """创建Elasticsearch索引，设置映射"""
+    try:
+        # 检查索引是否存在，如果存在则删除
+        if es.indices.exists(index=INDEX_NAME):
+            es.indices.delete(index=INDEX_NAME)
+
+        # 创建索引并定义映射
+        mapping = {
+            "settings": {
+                "analysis": {
+                    "analyzer": {
+                        "chinese_analyzer": {
+                            "type": "custom",
+                            "tokenizer": "ik_max_word",
+                            "filter": ["lowercase"]
+                        }
+                    }
+                }
+            },
+            "mappings": {
+                "properties": {
+                    "document_id": {"type": "integer"},
+                    "document_title": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "category_type": {"type": "keyword"},
+                    "specific_category": {"type": "keyword"},
+                    "document_type": {"type": "keyword"},
+                    "compilation_time": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "publication_time": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "h1_title": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "h2_title": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "h3_title": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "h4_title": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "full_text": {"type": "text", "analyzer": "chinese_analyzer"},
+                    "page_number": {"type": "integer"}
+                }
+            }
+        }
+
+        es.indices.create(index=INDEX_NAME, body=mapping)
+        logger.info(f"索引 {INDEX_NAME} 创建成功")
+        return True
+    except Exception as e:
+        logger.error(f"创建索引失败: {e}")
+        return False
+
+
+def sync_documents_basic():
+    """同步Documents表的基本信息到Elasticsearch"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cursor:
+            # 统计数据库中的文档数量
+            cursor.execute("SELECT COUNT(*) FROM Documents")
+            total_docs = cursor.fetchone()[0]
+            logger.info(f"数据库中共有 {total_docs} 条文档记录")
+
+            # 获取所有文档基本信息
+            cursor.execute("""
+                SELECT document_id, document_title, category_type, specific_category, 
+                       document_type, compilation_time, publication_time
+                FROM Documents
+            """)
+
+            documents = cursor.fetchall()
+            logger.info(f"查询到 {len(documents)} 条文档记录")
+
+            # 准备批量导入的数据
+            actions = []
+            for doc in documents:
+                doc_id, title, category_type, specific_category, doc_type, compile_time, pub_time = doc
+
+                action = {
+                    "_index": INDEX_NAME,
+                    "_source": {
+                        "document_id": doc_id,
+                        "document_title": title if title else "",
+                        "category_type": category_type if category_type else "",
+                        "specific_category": specific_category if specific_category else "",
+                        "document_type": doc_type if doc_type else "",
+                        "compilation_time": compile_time if compile_time else "",
+                        "publication_time": pub_time if pub_time else "",
+                        "h1_title": "",
+                        "h2_title": "",
+                        "h3_title": "",
+                        "h4_title": "",
+                        "full_text": "",
+                        "page_number": ""
+                    }
+                }
+                actions.append(action)
+
+            # 批量导入Elasticsearch
+            if actions:
+                success, failed = bulk(es, actions)
+                logger.info(f"成功导入 {success} 条基本文档信息，失败 {len(failed) if failed else 0} 条")
+                return success
+            else:
+                logger.warning("没有文档基本信息需要导入")
+                return 0
+    except Exception as e:
+        logger.error(f"同步文档基本信息失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def sync_full_content():
+    """同步文档全文和层级标题信息到Elasticsearch"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cursor:
+            # 获取所有已索引的文档ID
+            cursor.execute("SELECT document_id FROM Documents")
+            document_ids = [row[0] for row in cursor.fetchall()]
+
+            updated_count = 0
+
+            for doc_id in document_ids:
+                try:
+                    # 查找此文档的H1标题
+                    cursor.execute("""
+                        SELECT H1_id, H1_title 
+                        FROM H1 
+                        WHERE document_id = %s
+                        ORDER BY `order` ASC
+                        LIMIT 1
+                    """, (doc_id,))
+                    h1_row = cursor.fetchone()
+                    h1_id = h1_row[0] if h1_row else None
+                    h1_title = h1_row[1] if h1_row else ""
+
+                    # 查找H2标题
+                    h2_title = ""
+                    if h1_id:
+                        cursor.execute("""
+                            SELECT H2_title 
+                            FROM H2 
+                            WHERE H1_id = %s
+                            ORDER BY `order` ASC
+                            LIMIT 1
+                        """, (h1_id,))
+                        h2_row = cursor.fetchone()
+                        if h2_row:
+                            h2_title = h2_row[0]
+
+                    # H3和H4标题可以类似查询，但为简化代码，这里省略
+
+                    # 查找页码和全文
+                    cursor.execute("""
+                        SELECT p.page_number, ft.full_text
+                        FROM Pages p
+                        LEFT JOIN Full_Text ft ON p.full_text_id = ft.fulltext_id
+                        WHERE p.document_id = %s
+                        LIMIT 1
+                    """, (doc_id,))
+
+                    content_row = cursor.fetchone()
+                    page_number = content_row[0] if content_row and content_row[0] else 0
+                    full_text = content_row[1] if content_row and content_row[1] else ""
+
+                    # 更新Elasticsearch索引
+                    update_doc = {
+                        "doc": {
+                            "h1_title": h1_title,
+                            "h2_title": h2_title,
+                            "h3_title": "",  # 这里可以添加H3标题
+                            "h4_title": "",  # 这里可以添加H4标题
+                            "full_text": full_text,
+                            "page_number": page_number
+                        }
+                    }
+
+                    es.update(index=INDEX_NAME, id=doc_id, body=update_doc)
+                    updated_count += 1
+                except Exception as e:
+                    logger.error(f"更新文档 {doc_id} 的内容失败: {e}")
+
+            logger.info(f"成功更新 {updated_count} 个文档的全文和标题信息")
+            return updated_count
+    except Exception as e:
+        logger.error(f"同步全文和标题信息失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def sync_data_direct():
+    """直接从各表获取数据并同步到Elasticsearch"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cursor:
+            # 获取所有文档ID
+            cursor.execute("SELECT document_id FROM Documents")
+            document_ids = [row[0] for row in cursor.fetchall()]
+
+            actions = []
+            for doc_id in document_ids:
+                # 获取文档基本信息
+                cursor.execute("""
+                    SELECT document_title, category_type, specific_category, 
+                           document_type, compilation_time, publication_time
+                    FROM Documents
+                    WHERE document_id = %s
+                """, (doc_id,))
+
+                doc_info = cursor.fetchone()
+                if not doc_info:
+                    continue
+
+                title, category_type, specific_category, doc_type, compile_time, pub_time = doc_info
+
+                # 获取文档所有相关的全文内容
+                cursor.execute("""
+                    SELECT ft.full_text
+                    FROM Full_Text ft
+                    WHERE ft.document_id = %s
+                """, (doc_id,))
+
+                full_text_rows = cursor.fetchall()
+                full_text = " ".join([row[0] for row in full_text_rows if row[0]]) if full_text_rows else ""
+
+                # 获取H1-H4标题
+                cursor.execute("SELECT H1_title FROM H1 WHERE document_id = %s LIMIT 1", (doc_id,))
+                h1_row = cursor.fetchone()
+                h1_title = h1_row[0] if h1_row else ""
+
+                # 可以类似获取H2-H4标题，这里简化处理
+
+                # 获取页码信息
+                cursor.execute("SELECT page_number FROM Pages WHERE document_id = %s LIMIT 1", (doc_id,))
+                page_row = cursor.fetchone()
+                page_number = page_row[0] if page_row else 0
+
+                action = {
+                    "_index": INDEX_NAME,
+                    "_id": doc_id,  # 使用文档ID作为ES文档ID
+                    "_source": {
+                        "document_id": doc_id,
+                        "document_title": title if title else "",
+                        "category_type": category_type if category_type else "",
+                        "specific_category": specific_category if specific_category else "",
+                        "document_type": doc_type if doc_type else "",
+                        "compilation_time": compile_time if compile_time else "",
+                        "publication_time": pub_time if pub_time else "",
+                        "h1_title": h1_title,
+                        "h2_title": "",  # 可以添加实际H2标题
+                        "h3_title": "",  # 可以添加实际H3标题
+                        "h4_title": "",  # 可以添加实际H4标题
+                        "full_text": full_text,
+                        "page_number": page_number
+                    }
+                }
+
+                actions.append(action)
+
+            # 批量导入Elasticsearch
+            if actions:
+                success, failed = bulk(es, actions)
+                logger.info(f"成功导入 {success} 条完整文档信息，失败 {len(failed) if failed else 0} 条")
+                return success
+            else:
+                logger.warning("没有文档需要导入")
+                return 0
+    except Exception as e:
+        logger.error(f"直接同步数据失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def sync_shihan_full_text():
+    """同步shihan_full_text表到Elasticsearch"""
+    conn = connect_db()
+    try:
+        with conn.cursor() as cursor:
+            # 检查表是否存在
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM information_schema.tables 
+                WHERE table_schema = %s 
+                AND table_name = 'shihan_full_text'
+            """, (DB_CONFIG['db'],))
+
+            if cursor.fetchone()[0] == 0:
+                logger.warning("shihan_full_text表不存在，跳过同步")
+                return 0
+
+            # 获取shihan_full_text表的所有记录
+            cursor.execute("SELECT fulltext_id, full_text FROM shihan_full_text")
+            rows = cursor.fetchall()
+
+            if not rows:
+                logger.warning("shihan_full_text表中没有数据")
+                return 0
+
+            logger.info(f"从shihan_full_text表中获取到 {len(rows)} 条记录")
+
+            # 准备批量导入的数据
+            actions = []
+            for row in rows:
+                text_id, full_text = row
+
+                # 为shihan_full_text创建一个特殊的document_id格式，例如"shihan_1"
+                doc_id = f"shihan_{text_id}"
+
+                action = {
+                    "_index": INDEX_NAME,
+                    "_id": doc_id,
+                    "_source": {
+                        "document_id": text_id,
+                        "document_title": f"史记全文 #{text_id}",
+                        "category_type": "史记",
+                        "specific_category": "史记全文",
+                        "document_type": "古籍",
+                        "compilation_time": "西汉",
+                        "publication_time": "西汉",
+                        "h1_title": "史记",
+                        "h2_title": "",
+                        "h3_title": "",
+                        "h4_title": "",
+                        "full_text": full_text,
+                        "page_number": text_id
+                    }
+                }
+
+                actions.append(action)
+
+            # 批量导入Elasticsearch
+            if actions:
+                success, failed = bulk(es, actions)
+                logger.info(f"成功导入 {success} 条史记全文记录，失败 {len(failed) if failed else 0} 条")
+                return success
+            else:
+                logger.warning("没有史记全文需要导入")
+                return 0
+    except Exception as e:
+        logger.error(f"同步史记全文失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+@app.route('/')
+def index():
+    """渲染搜索页面"""
+    return render_template('index.html')
+
+
+@app.route('/api/search', methods=['POST'])
+def search():
+    """API端点：执行搜索并返回结果"""
+    data = request.json
+    search_type = data.get('search_type', 'basic')
+    query_text = data.get('query', '')
+    filters = data.get('filters', {})
+
+    logger.info(f"执行{search_type}搜索，关键词：'{query_text}'，过滤条件：{filters}")
+
+    # 根据搜索类型执行不同的搜索
+    if search_type == 'basic':
+        results = basic_search(query_text, filters)
+    elif search_type == 'fulltext':
+        results = fulltext_search(query_text, filters)
+    elif search_type == 'fuzzy':
+        results = fuzzy_search(query_text, filters)
+    elif search_type == 'highlight':
+        results = highlight_search(query_text, filters)
+    elif search_type == 'variant':
+        results = variant_search(query_text, filters)
+    else:
+        return jsonify({"error": "不支持的搜索类型"}), 400
+
+    logger.info(f"搜索结果：找到 {results['total']} 条匹配结果")
+    return jsonify(results)
+
+
+def basic_search(query, filters=None):
+    """基本检索：精确匹配指定字段"""
+    must_conditions = []
+
+    # 如果没有查询词，返回所有文档
+    if not query:
+        must_conditions.append({
+            "match_all": {}
+        })
+    else:
+        # 添加主查询条件
+        must_conditions.append({
+            "multi_match": {
+                "query": query,
+                "fields": ["document_title", "category_type", "document_type",
+                           "h1_title", "h2_title", "h3_title", "h4_title",
+                           "full_text"]
+            }
+        })
+
+    # 添加过滤条件
+    if filters:
+        for field, value in filters.items():
+            if value:
+                if field in ['compilation_time', 'publication_time'] and isinstance(value, dict):
+                    must_conditions.append({
+                        "range": {
+                            field: {
+                                "gte": value.get('from', ''),
+                                "lte": value.get('to', '')
+                            }
+                        }
+                    })
+                else:
+                    must_conditions.append({
+                        "match": {
+                            field: value
+                        }
+                    })
+
+    # 构建查询
+    query_body = {
+        "query": {
+            "bool": {
+                "must": must_conditions
+            }
+        },
+        "size": 100  # 限制返回结果数量
+    }
+
+    logger.debug(f"基本搜索查询：{json.dumps(query_body)}")
+
+    # 执行查询
+    response = es.search(index=INDEX_NAME, body=query_body)
+
+    # 解析结果
+    results = []
+    for hit in response['hits']['hits']:
+        source = hit['_source']
+        results.append({
+            "score": hit['_score'],
+            "document_id": source['document_id'],
+            "document_title": source['document_title'],
+            "category_type": source['category_type'],
+            "document_type": source['document_type'],
+            "page_number": source['page_number'],
+            "content_preview": source['full_text'][:200] + "..." if source['full_text'] and len(
+                source['full_text']) > 200 else source['full_text']
+        })
+
+    return {
+        "total": response['hits']['total']['value'],
+        "results": results
+    }
+
+
+def fulltext_search(query, filters=None):
+    """全文检索：在所有文本字段中搜索"""
+    must_conditions = []
+
+    # 如果没有查询词，返回所有文档
+    if not query:
+        must_conditions.append({
+            "match_all": {}
+        })
+    else:
+        # 添加全文搜索条件
+        must_conditions.append({
+            "multi_match": {
+                "query": query,
+                "fields": ["document_title", "category_type", "document_type",
+                           "h1_title", "h2_title", "h3_title", "h4_title",
+                           "full_text"],
+                "type": "best_fields",
+                "tie_breaker": 0.3
+            }
+        })
+
+    # 添加过滤条件
+    if filters:
+        for field, value in filters.items():
+            if value:
+                if field in ['compilation_time', 'publication_time'] and isinstance(value, dict):
+                    must_conditions.append({
+                        "range": {
+                            field: {
+                                "gte": value.get('from', ''),
+                                "lte": value.get('to', '')
+                            }
+                        }
+                    })
+                else:
+                    must_conditions.append({
+                        "match": {
+                            field: value
+                        }
+                    })
+
+    # 构建查询
+    query_body = {
+        "query": {
+            "bool": {
+                "must": must_conditions
+            }
+        },
+        "size": 100
+    }
+
+    logger.debug(f"全文搜索查询：{json.dumps(query_body)}")
+
+    # 执行查询
+    response = es.search(index=INDEX_NAME, body=query_body)
+
+    # 解析结果
+    results = []
+    for hit in response['hits']['hits']:
+        source = hit['_source']
+        results.append({
+            "score": hit['_score'],
+            "document_id": source['document_id'],
+            "document_title": source['document_title'],
+            "category_type": source['category_type'],
+            "document_type": source['document_type'],
+            "page_number": source['page_number'],
+            "content_preview": source['full_text'][:200] + "..." if source['full_text'] and len(
+                source['full_text']) > 200 else source['full_text']
+        })
+
+    return {
+        "total": response['hits']['total']['value'],
+        "results": results
+    }
+
+
+def fuzzy_search(query, filters=None):
+    """模糊检索：使用模糊匹配和通配符搜索"""
+    must_conditions = []
+
+    # 如果没有查询词，返回所有文档
+    if not query:
+        must_conditions.append({
+            "match_all": {}
+        })
+    else:
+        # 添加模糊搜索条件 - 保持标题与内容匹配同等重要
+        should_conditions = [
+            # 模糊匹配标题
+            {
+                "fuzzy": {
+                    "document_title": {
+                        "value": query,
+                        "fuzziness": "AUTO"
+                    }
+                }
+            },
+            # 模糊匹配全文
+            {
+                "fuzzy": {
+                    "full_text": {
+                        "value": query,
+                        "fuzziness": "AUTO"
+                    }
+                }
+            },
+            # 模糊匹配各级标题
+            {
+                "fuzzy": {
+                    "h1_title": {
+                        "value": query,
+                        "fuzziness": "AUTO"
+                    }
+                }
+            },
+            {
+                "fuzzy": {
+                    "h2_title": {
+                        "value": query,
+                        "fuzziness": "AUTO"
+                    }
+                }
+            },
+            # 通配符搜索
+            {
+                "wildcard": {
+                    "document_title": f"*{query}*"
+                }
+            },
+            {
+                "wildcard": {
+                    "full_text": f"*{query}*"
+                }
+            }
+        ]
+
+        must_conditions.append({
+            "bool": {
+                "should": should_conditions,
+                "minimum_should_match": 1
+            }
+        })
+
+    # 添加过滤条件
+    if filters:
+        for field, value in filters.items():
+            if value:
+                if field in ['compilation_time', 'publication_time'] and isinstance(value, dict):
+                    must_conditions.append({
+                        "range": {
+                            field: {
+                                "gte": value.get('from', ''),
+                                "lte": value.get('to', '')
+                            }
+                        }
+                    })
+                else:
+                    must_conditions.append({
+                        "match": {
+                            field: value
+                        }
+                    })
+
+    # 构建查询
+    query_body = {
+        "query": {
+            "bool": {
+                "must": must_conditions
+            }
+        },
+        "size": 100
+    }
+
+    logger.debug(f"模糊搜索查询：{json.dumps(query_body)}")
+
+    # 执行查询
+    response = es.search(index=INDEX_NAME, body=query_body)
+
+    # 解析结果
+    results = []
+    for hit in response['hits']['hits']:
+        source = hit['_source']
+        results.append({
+            "score": hit['_score'],
+            "document_id": source['document_id'],
+            "document_title": source['document_title'],
+            "category_type": source['category_type'],
+            "document_type": source['document_type'],
+            "page_number": source['page_number'],
+            "content_preview": source['full_text'][:200] + "..." if source['full_text'] and len(
+                source['full_text']) > 200 else source['full_text']
+        })
+
+    return {
+        "total": response['hits']['total']['value'],
+        "results": results
+    }
+
+
+def highlight_search(query, filters=None):
+    """高亮检索：返回带高亮标记的搜索结果"""
+    must_conditions = []
+
+    # 如果没有查询词，返回所有文档
+    if not query:
+        must_conditions.append({
+            "match_all": {}
+        })
+    else:
+        # 添加搜索条件 - 修改后所有字段权重相同
+        must_conditions.append({
+            "multi_match": {
+                "query": query,
+                "fields": ["document_title", "category_type", "document_type",
+                           "h1_title", "h2_title", "h3_title", "h4_title",
+                           "full_text"],
+            }
+        })
+
+    # 添加过滤条件
+    if filters:
+        for field, value in filters.items():
+            if value:
+                if field in ['compilation_time', 'publication_time'] and isinstance(value, dict):
+                    must_conditions.append({
+                        "range": {
+                            field: {
+                                "gte": value.get('from', ''),
+                                "lte": value.get('to', '')
+                            }
+                        }
+                    })
+                else:
+                    must_conditions.append({
+                        "match": {
+                            field: value
+                        }
+                    })
+
+    # 构建查询
+    query_body = {
+        "query": {
+            "bool": {
+                "must": must_conditions
+            }
+        },
+        "highlight": {
+            "pre_tags": ["<em class='highlight'>"],
+            "post_tags": ["</em>"],
+            "fields": {
+                "document_title": {},
+                "h1_title": {},
+                "h2_title": {},
+                "h3_title": {},
+                "h4_title": {},
+                "full_text": {
+                    "fragment_size": 150,
+                    "number_of_fragments": 3
+                }
+            }
+        },
+        "size": 100
+    }
+
+    logger.debug(f"高亮搜索查询：{json.dumps(query_body)}")
+
+    # 执行查询
+    response = es.search(index=INDEX_NAME, body=query_body)
+
+    # 解析结果
+    results = []
+    for hit in response['hits']['hits']:
+        source = hit['_source']
+        highlight = hit.get('highlight', {})
+
+        # 获取高亮字段，如果没有高亮则使用原始内容
+        title_highlight = highlight.get('document_title', [source['document_title']])[0] if source[
+            'document_title'] else ""
+        content_highlight = " ... ".join(highlight.get('full_text', [])) if 'full_text' in highlight else (
+            source['full_text'][:200] + "..." if source['full_text'] and len(source['full_text']) > 200 else source[
+                'full_text'])
+
+        results.append({
+            "score": hit['_score'],
+            "document_id": source['document_id'],
+            "document_title": title_highlight,
+            "category_type": source['category_type'],
+            "document_type": source['document_type'],
+            "page_number": source['page_number'],
+            "content_preview": content_highlight,
+            "has_highlight": bool(highlight)
+        })
+
+    return {
+        "total": response['hits']['total']['value'],
+        "results": results
+    }
+
+
+def variant_search(query, filters=None):
+    """异文检索：查找可能是异文的内容"""
+    must_conditions = []
+
+    if not query:
+        return {
+            "total": 0,
+            "results": [],
+            "error": "异文检索需要输入查询词"
+        }
+
+    # 对于异文检索，我们需要设计更智能的查询策略
+    # 1. 精确词组查询 - 寻找完全匹配的短语
+    # 2. 模糊匹配 - 寻找相似但不完全相同的文本
+    # 3. 同义词扩展 - 如果有同义词词典，可以扩展查询
+
+    should_conditions = [
+        # 精确短语匹配
+        {
+            "match_phrase": {
+                "full_text": {
+                    "query": query,
+                    "slop": 0,  # 不允许词条之间有间隔
+                    "boost": 10  # 提高精确匹配的权重
+                }
+            }
+        },
+        # 近似短语匹配
+        {
+            "match_phrase": {
+                "full_text": {
+                    "query": query,
+                    "slop": 2,  # 允许词条之间有少量间隔
+                    "boost": 5
+                }
+            }
+        },
+        # 标准匹配 - 允许词条出现在文档中的任何位置
+        {
+            "match": {
+                "full_text": {
+                    "query": query,
+                    "minimum_should_match": "75%",
+                    "boost": 1
+                }
+            }
+        },
+        # 对于较短的查询词，使用模糊匹配找出可能的异文
+        {
+            "fuzzy": {
+                "full_text": {
+                    "value": query,
+                    "fuzziness": "AUTO",
+                    "boost": 0.5
+                }
+            }
+        }
+    ]
+
+    must_conditions.append({
+        "bool": {
+            "should": should_conditions,
+            "minimum_should_match": 1
+        }
+    })
+
+    # 添加过滤条件
+    if filters:
+        for field, value in filters.items():
+            if value and field not in ['show_context']:  # 排除非过滤字段
+                if field in ['compilation_time', 'publication_time'] and isinstance(value, dict):
+                    must_conditions.append({
+                        "range": {
+                            field: {
+                                "gte": value.get('from', ''),
+                                "lte": value.get('to', '')
+                            }
+                        }
+                    })
+                else:
+                    must_conditions.append({
+                        "match": {
+                            field: value
+                        }
+                    })
+
+    # 构建查询
+    query_body = {
+        "query": {
+            "bool": {
+                "must": must_conditions
+            }
+        },
+        "highlight": {
+            "pre_tags": ["<em class='highlight'>"],
+            "post_tags": ["</em>"],
+            "fields": {
+                "full_text": {
+                    "fragment_size": 200,
+                    "number_of_fragments": 1
+                }
+            }
+        },
+        "size": 100
+    }
+
+    logger.debug(f"异文查询：{json.dumps(query_body)}")
+
+    # 执行查询
+    response = es.search(index=INDEX_NAME, body=query_body)
+
+    # 解析结果
+    results = []
+    for hit in response['hits']['hits']:
+        source = hit['_source']
+        highlight = hit.get('highlight', {})
+
+        # 显示上下文设置
+        show_context = filters.get('show_context', True) if filters else True
+
+        # 从全文中提取最相似的片段作为可能的异文
+        full_text = source['full_text']
+        content_highlight = " ... ".join(highlight.get('full_text', [])) if 'full_text' in highlight else ""
+
+        # 如果没有高亮结果，尝试手动查找相似片段
+        if not content_highlight and full_text:
+            variant_text = extract_similar_text(full_text, query, context_size=50 if show_context else 0)
+        else:
+            variant_text = content_highlight
+
+        # 预览内容展示
+        if show_context:
+            content_preview = variant_text if variant_text else (
+                full_text[:200] + "..." if len(full_text) > 200 else full_text)
+        else:
+            # 如果不显示上下文，只显示查找到的异文
+            content_preview = "..." if variant_text else "未找到明显的异文"
+
+        results.append({
+            "score": hit['_score'],
+            "document_id": source['document_id'],
+            "document_title": source['document_title'],
+            "category_type": source['category_type'],
+            "document_type": source['document_type'],
+            "page_number": source['page_number'],
+            "content_preview": content_preview,
+            "variant_text": variant_text,
+            "has_highlight": bool(highlight)
+        })
+
+    return {
+        "total": response['hits']['total']['value'],
+        "results": results
+    }
+
+
+def extract_similar_text(full_text, query, context_size=50):
+    """从全文中提取与查询最相似的片段"""
+    if not full_text or not query:
+        return ""
+
+    # 简单实现：查找包含查询中词语最多的文本片段
+    # 在实际应用中，可能需要更复杂的算法来找到最相似的文本
+
+    # 将查询和全文分词
+    query_chars = set(query)
+
+    max_similarity = 0
+    best_match = ""
+    best_start = 0
+
+    # 滑动窗口查找最相似片段
+    window_size = min(len(query) * 2, len(full_text))
+    for i in range(0, len(full_text) - window_size + 1):
+        window = full_text[i:i + window_size]
+        window_chars = set(window)
+
+        # 计算相似度（简化为字符重叠数量）
+        similarity = len(query_chars.intersection(window_chars)) / len(query_chars)
+
+        if similarity > max_similarity:
+            max_similarity = similarity
+            best_match = window
+            best_start = i
+
+    # 如果找到匹配并且要显示上下文
+    if best_match and context_size > 0:
+        # 扩展上下文
+        start = max(0, best_start - context_size)
+        end = min(len(full_text), best_start + window_size + context_size)
+        context = full_text[start:end]
+        return context
+
+    return best_match
+
+
+@app.route('/api/reindex', methods=['POST'])
+def reindex():
+    """重新索引API端点"""
+    try:
+        # 创建索引
+        index_created = create_es_index()
+        if not index_created:
+            return jsonify({"success": False, "error": "索引创建失败"}), 500
+
+        # 同步类书数据
+        main_count = sync_data_direct()
+
+        # 同步史记全文数据
+        shihan_count = sync_shihan_full_text()
+
+        total_count = main_count + shihan_count
+
+        return jsonify({
+            "success": True,
+            "message": f"重新索引完成，共导入 {total_count} 条文档（类书 {main_count} 条，史记 {shihan_count} 条）"
+        })
+    except Exception as e:
+        logger.error(f"重新索引失败: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/database-info', methods=['GET'])
+def get_database_info():
+    """获取数据库信息"""
+    try:
+        conn = connect_db()
+        info = {}
+
+        with conn.cursor() as cursor:
+            # 获取各表记录数
+            tables = ['Documents', 'Pages', 'Full_Text', 'H1', 'H2', 'H3', 'H4']
+            for table in tables:
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                info[f"{table}_count"] = cursor.fetchone()[0]
+
+            # 获取史记全文表记录数
+            try:
+                cursor.execute("SELECT COUNT(*) FROM shihan_full_text")
+                info["shihan_count"] = cursor.fetchone()[0]
+            except:
+                info["shihan_count"] = 0
+
+            # 获取没有页面的文档数
+            cursor.execute("""
+                SELECT COUNT(*) FROM Documents d 
+                WHERE NOT EXISTS (SELECT 1 FROM Pages p WHERE p.document_id = d.document_id)
+            """)
+            info["documents_without_pages"] = cursor.fetchone()[0]
+
+            # 获取没有全文的页面数
+            cursor.execute("""
+                SELECT COUNT(*) FROM Pages p
+                WHERE p.full_text_id IS NULL OR NOT EXISTS 
+                    (SELECT 1 FROM Full_Text ft WHERE ft.fulltext_id = p.full_text_id)
+            """)
+            info["pages_without_fulltext"] = cursor.fetchone()[0]
+
+            # 获取Elasticsearch索引文档数
+            try:
+                es_stats = es.count(index=INDEX_NAME)
+                info["es_doc_count"] = es_stats["count"]
+            except:
+                info["es_doc_count"] = 0
+
+        return jsonify({"success": True, "info": info})
+    except Exception as e:
+        logger.error(f"获取数据库信息失败: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+# 初始化和同步数据的函数
+def init():
+    """初始化Elasticsearch索引并同步数据"""
+    try:
+        # 创建索引
+        create_es_index()
+
+        # 尝试直接同步所有类书数据
+        count = sync_data_direct()
+        logger.info(f"直接同步类书完成，共导入 {count} 条文档")
+
+        # 同步史记全文数据
+        shihan_count = sync_shihan_full_text()
+        logger.info(f"同步史记全文完成，共导入 {shihan_count} 条文档")
+
+        # 如果直接同步失败或导入数量少，尝试分步同步
+        if count == 0:
+            # 先导入文档基本信息
+            basic_count = sync_documents_basic()
+            logger.info(f"基本信息同步完成，共导入 {basic_count} 条文档")
+
+            # 再更新全文和标题信息
+            content_count = sync_full_content()
+            logger.info(f"内容信息更新完成，共更新 {content_count} 条文档")
+
+        logger.info("数据同步完成")
+    except Exception as e:
+        logger.error(f"初始化失败: {e}")
+        raise
+
+
+if __name__ == '__main__':
+    # 初始化索引和数据
+    init()
+
+    # 启动Flask应用
+    app.run(debug=True, port=5000)
