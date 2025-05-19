@@ -56,7 +56,7 @@ WANDB_CONFIG = {
     "log_interval": 10
 }
 
-ALLOWED_HOSTS = ['39.107.68.189', 'localhost', '127.0.0.1','111.205.230.232']
+ALLOWED_HOSTS = ['39.107.68.189', 'localhost', '127.0.0.1','111.205.230.232','116.172.93.147']
 
 EMAIL_HOST_USER = '2300016618@stu.pku.edu.cn'   # 请替换为自己的邮箱
 
