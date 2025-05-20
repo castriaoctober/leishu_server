@@ -56,7 +56,7 @@ WANDB_CONFIG = {
     "log_interval": 10
 }
 
-ALLOWED_HOSTS = ['39.107.68.189', 'localhost', '127.0.0.1','111.205.230.232','116.172.93.147']
+ALLOWED_HOSTS = ['39.107.68.189', 'localhost', '127.0.0.1','111.205.230.232','116.172.93.147','123.57.204.18']
 
 EMAIL_HOST_USER = '2300016618@stu.pku.edu.cn'   # 请替换为自己的邮箱
 
@@ -209,3 +209,4 @@ CORS_ALLOW_HEADERS = [
 
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 MEDIA_URL = '/media/'
+

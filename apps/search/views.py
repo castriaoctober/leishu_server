@@ -536,7 +536,7 @@ def basic_search(request):
         conn = pymysql.connect(
             host='localhost',
             user='root',
-            password='191214biovsc',
+            password='Leishu2025!',
             db='leishu_yongle',
             charset='utf8mb4',
             cursorclass=pymysql.cursors.DictCursor
@@ -776,7 +776,7 @@ def similar_search_milvus(request):
     DB_CONFIG = {
         "host": "localhost",
         "user": "root",
-        "password": "191214biovsc",
+        "password": "Leishu2025!",
         "database": "leishu_yongle",
         "charset": "utf8mb4"
     }
