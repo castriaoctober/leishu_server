@@ -41,7 +41,20 @@ milvus_collections = {key: create_collection(value) for key, value in collection
 
 # 加载 BERT-ancient-chinese 模型
 model_name = "Jihuai/bert-ancient-chinese"
-word_embedding_model = models.Transformer(model_name)
+local_model_path = "/root/project/leishu/bert-ancient-chinese"
+try:
+    # 尝试从本地加载模型
+    word_embedding_model = models.Transformer(local_model_path)
+    print(f"[INFO] 成功从本地加载模型: {local_model_path}")
+except Exception as e:
+    print(f"[WARNING] 本地模型加载失败 ({str(e)}), 尝试从远程下载...")
+    try:
+        # 从远程加载模型
+        word_embedding_model = models.Transformer(model_name)
+        print(f"[INFO] 成功从远程加载模型: {model_name}")
+    except Exception as e:
+        print(f"[ERROR] 模型加载失败: {str(e)}")
+        raise
 pooling_model = models.Pooling(
     word_embedding_model.get_word_embedding_dimension(),
     pooling_mode_mean_tokens=True

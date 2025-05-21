@@ -733,7 +733,7 @@ def similar_search_milvus(request):
             from sentence_transformers import models, SentenceTransformer
 
             # 修改为本地模型路径,请替换你的存放地址
-            local_model_path = "C://Users//14298//Desktop//bert-ancient-chinese"
+            local_model_path = "/root/project/leishu/bert-ancient-chinese"
             # 直接加载本地模型
             word_embedding_model = models.Transformer(local_model_path)
             pooling_model = models.Pooling(
