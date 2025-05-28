@@ -29,8 +29,8 @@ DATABASES = {
         'NAME': 'leishu_yongle', # 数据库名称
         'HOST': '127.0.0.1', # 数据库地址，本机 ip 地址 127.0.0.1
         'PORT': 3306, # 端口
-        'USER': 'root',  # 数据库用户名
-        'PASSWORD': 'sdbz@2024#$', # 数据库密码
+        'USER': 'leishu',  # 数据库用户名
+        'PASSWORD': 'Leishu(*&*112M!', # 数据库密码
     }
     }
 
@@ -38,8 +38,8 @@ DATABASES = {
 DB_CONFIG = {
     'host': 'localhost',
     'port': 3306,
-    'user': 'root',
-    'password': 'sdbz@2024#$',  # 请修改为你的MySQL密码
+    'user': 'leishu',
+    'password': 'Leishu(*&*112M!',  # 请修改为你的MySQL密码
     'db': 'leishu_yongle',  # 使用新的数据库名
     'charset': 'utf8mb4'
 }
@@ -57,7 +57,7 @@ ES_CONFIG = {
         }
     ],
     # 如果需要认证
-    'http_auth': ('root', 'GEtu202461!') if ES_NEEDS_AUTH else None,
+    'http_auth': ('leishu', 'Leishu(*&*112M!') if ES_NEEDS_AUTH else None,
     'timeout': 60,  # 增加超时时间，因为现在是远程连接
 }
 

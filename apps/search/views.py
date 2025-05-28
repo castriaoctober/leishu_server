@@ -535,8 +535,8 @@ def basic_search(request):
         # 使用全字段搜索逻辑
         conn = pymysql.connect(
             host='localhost',
-            user='root',
-            password='sdbz@2024#$',
+            user='leishu',
+            password='Leishu(*&*112M!',
             db='leishu_yongle',
             charset='utf8mb4',
             cursorclass=pymysql.cursors.DictCursor
@@ -775,8 +775,8 @@ def similar_search_milvus(request):
     # 数据库配置
     DB_CONFIG = {
         "host": "localhost",
-        "user": "root",
-        "password": "sdbz@2024#$",
+        "user": "leishu",
+        "password": "Leishu(*&*112M!",
         "database": "leishu_yongle",
         "charset": "utf8mb4"
     }
