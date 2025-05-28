@@ -12,7 +12,7 @@ connections.connect("default", host="localhost", port="19530")
 db_connection = pymysql.connect(
     host="localhost",
     user="root",
-    password="Leishu2025!",  # 输入 MySQL 密码
+    password="sdbz@2024#$",  # 输入 MySQL 密码
     database="leishu_yongle",
     charset="utf8mb4"
 )
@@ -41,7 +41,7 @@ milvus_collections = {key: create_collection(value) for key, value in collection
 
 # 加载 BERT-ancient-chinese 模型
 model_name = "Jihuai/bert-ancient-chinese"
-local_model_path = "/root/project/leishu/bert-ancient-chinese"
+local_model_path = "/root/leishu/bert-ancient-chinese"
 try:
     # 尝试从本地加载模型
     word_embedding_model = models.Transformer(local_model_path)

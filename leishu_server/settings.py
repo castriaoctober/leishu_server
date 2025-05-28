@@ -30,7 +30,7 @@ DATABASES = {
         'HOST': '127.0.0.1', # 数据库地址，本机 ip 地址 127.0.0.1
         'PORT': 3306, # 端口
         'USER': 'root',  # 数据库用户名
-        'PASSWORD': 'Leishu2025!', # 数据库密码
+        'PASSWORD': 'sdbz@2024#$', # 数据库密码
     }
     }
 
@@ -39,15 +39,29 @@ DB_CONFIG = {
     'host': 'localhost',
     'port': 3306,
     'user': 'root',
-    'password': 'Leishu2025!',  # 请修改为你的MySQL密码
+    'password': 'sdbz@2024#$',  # 请修改为你的MySQL密码
     'db': 'leishu_yongle',  # 使用新的数据库名
     'charset': 'utf8mb4'
 }
 
+
 # Elasticsearch连接配置
+ES_NEEDS_AUTH = True
+
 ES_CONFIG = {
-    'hosts': ['http://localhost:9200']
+    'hosts': [
+        {
+            'host': '120.26.247.52',  # 替换为 A 服务器的 IP 地址或域名
+            'port': 9200,           # ES 默认端口
+            'scheme': 'http'        # 或 'https' 如果配置了 SSL
+        }
+    ],
+    # 如果需要认证
+    'http_auth': ('root', 'GEtu202461!') if ES_NEEDS_AUTH else None,
+    'timeout': 60,  # 增加超时时间，因为现在是远程连接
 }
+
+
 
 # 日志配置
 LOGGER = "default"
@@ -56,7 +70,7 @@ WANDB_CONFIG = {
     "log_interval": 10
 }
 
-ALLOWED_HOSTS = ['39.107.68.189', 'localhost', '127.0.0.1','111.205.230.232','116.172.93.147','123.57.204.18']
+ALLOWED_HOSTS = ['39.107.68.189', 'localhost', '127.0.0.1','111.205.230.232','116.172.93.147','123.57.204.18','120.26.247.52']
 
 EMAIL_HOST_USER = '2300016618@stu.pku.edu.cn'   # 请替换为自己的邮箱
 
